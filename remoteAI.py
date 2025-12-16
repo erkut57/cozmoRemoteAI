@@ -69,7 +69,8 @@ MAX_NEW_TOKENS = 80
 
 # ============================================================
 # EMOTION MAPPING (ADDED - minimal, aber zuverlässig)
-# - wir nutzen Anim-Triggers statt harte Anim-Namen
+# - KEINE harten Trigger mehr -> getattr (sonst crash)
+# - Fallback auf anim_names, wenn Trigger fehlen
 # ============================================================
 EMOJI_EMOTION_MAP = {
     "😂": "laugh", "🤣": "laugh",
@@ -91,33 +92,42 @@ KEYWORD_EMOTION_RULES = [
     (r"\b(müde|schlaf|gähn)\b", "sleepy"),
 ]
 
-# Trigger-Liste je Emotion (Fallback: wenn ein Trigger mal fehlt -> einfach skip)
-EMOTION_TRIGGERS = {
-    "happy": [
-        cozmo.anim.Triggers.ReactToGoodNews,
-        cozmo.anim.Triggers.CodeLabHappy,
-        cozmo.anim.Triggers.SparkSuccess
-    ],
-    "laugh": [
-        cozmo.anim.Triggers.CodeLabHappy,
-        cozmo.anim.Triggers.ReactToGoodNews
-    ],
-    "sad": [
-        cozmo.anim.Triggers.CodeLabUnhappy,
-        cozmo.anim.Triggers.ReactToBadNews
-    ],
-    "surprised": [
-        cozmo.anim.Triggers.ReactToSurprise
-    ],
-    "angry": [
-        cozmo.anim.Triggers.CodeLabAngry
-    ],
-    "sleepy": [
-        cozmo.anim.Triggers.Sleeping
-    ],
-    "wink": [
-        cozmo.anim.Triggers.CodeLabHappy
-    ],
+def _get_trigger(name: str):
+    # safe: gibt Trigger oder None zurück (kein AttributeError)
+    return getattr(cozmo.anim.Triggers, name, None)
+
+def _build_emotion_triggers():
+    # nur Namen, die existieren, werden aufgenommen
+    candidates = {
+        "happy":     ["ReactToGoodNews", "CodeLabHappy", "SparkSuccess"],
+        "laugh":     ["CodeLabHappy", "ReactToGoodNews"],
+        "sad":       ["CodeLabUnhappy", "ReactToBadNews"],
+        "surprised": ["ReactToSurprise", "CodeLabSurprised"],
+        "angry":     ["CodeLabAngry", "ReactToAnger"],
+        "sleepy":    ["Sleeping", "CodeLabTired"],
+        "wink":      ["CodeLabHappy"],
+    }
+    out = {}
+    for emotion, names in candidates.items():
+        lst = []
+        for n in names:
+            t = _get_trigger(n)
+            if t is not None:
+                lst.append(t)
+        out[emotion] = lst
+    return out
+
+EMOTION_TRIGGERS = _build_emotion_triggers()
+
+# Fallback-Animationen (werden nur genutzt, wenn Trigger fehlen)
+FALLBACK_ANIMS = {
+    "happy": ["anim_poked_giggle", "anim_bored_event_02", "anim_speedtap_wingame_intensity02_01"],
+    "laugh": ["anim_poked_giggle", "anim_speedtap_wingame_intensity02_01"],
+    "sad": ["anim_bored_event_03", "anim_bored_01"],
+    "surprised": ["anim_pounce_success_02"],
+    "angry": ["anim_reacttoface_unidentified_02"],
+    "sleepy": ["anim_bored_01"],
+    "wink": ["anim_bored_event_02"],
 }
 # ============================================================
 
@@ -378,20 +388,31 @@ class RemoteControlCozmo:
         emotion = self._detect_emotion(human_text, reply_text)
         if not emotion:
             return
-        triggers = EMOTION_TRIGGERS.get(emotion, [])
-        if not triggers:
-            return
 
-        trig = random.choice(triggers)
-        try:
-            # kurz abspielen, dann wird das Gesicht/Emotion sichtbar
-            await self.cozmo.play_anim_trigger(trig).wait_for_completed()
-        except cozmo.exceptions.RobotBusy:
-            # wenn busy -> skip, damit chat nicht hängen bleibt
-            return
-        except Exception as e:
-            print(f"[EMOTION] Error: {e}")
-            return
+        triggers = EMOTION_TRIGGERS.get(emotion, [])
+        # 1) Trigger wenn vorhanden
+        if triggers:
+            trig = random.choice(triggers)
+            try:
+                await self.cozmo.play_anim_trigger(trig).wait_for_completed()
+                return
+            except cozmo.exceptions.RobotBusy:
+                return
+            except Exception as e:
+                print(f"[EMOTION] Trigger Error: {e}")
+                # dann fallback
+
+        # 2) Fallback: Animationsnamen, die (meist) in anim_names existieren
+        for anim_name in FALLBACK_ANIMS.get(emotion, []):
+            if anim_name in self.anim_names:
+                try:
+                    await self.cozmo.play_anim(name=anim_name).wait_for_completed()
+                    return
+                except cozmo.exceptions.RobotBusy:
+                    return
+                except Exception as e:
+                    print(f"[EMOTION] Anim Error: {e}")
+                    return
     # ----------------------------------------------------------
 
     # ---------------- AI control ----------------
@@ -400,7 +421,6 @@ class RemoteControlCozmo:
         if self.ai_enabled:
             if self.ai_task is None or self.ai_task.done():
                 self.ai_task = self.loop.create_task(self._ai_chat_loop())
-        # wenn False: loop beendet sich selbst nach nächstem Check
 
     def set_ai_prompt(self, new_prompt: str):
         new_prompt = (new_prompt or "").strip()
@@ -440,9 +460,7 @@ class RemoteControlCozmo:
             print(f"[HUMAN] {human}")
             print(f"[AI   ] {reply}")
 
-            # ---- ADDED: Emotion kurz zeigen (zuverlässig) ----
-            await self._play_emotion_for_text(human, reply)
-            # -----------------------------------------------
+            
 
             try:
                 await self.cozmo.say_text(
@@ -453,6 +471,10 @@ class RemoteControlCozmo:
                 ).wait_for_completed()
             except Exception:
                 pass
+
+            # ---- ADDED: Emotion kurz zeigen (zuverlässig) ----
+            await self._play_emotion_for_text(human, reply)
+            # -----------------------------------------------
 
         print("[AI] chat loop ended")
         try:
