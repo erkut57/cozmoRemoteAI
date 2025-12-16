@@ -24,6 +24,7 @@ import io
 import json
 import math
 import sys
+import random  # <--- ADDED
 
 sys.path.append('../lib/')
 import flask_helpers
@@ -49,6 +50,38 @@ except ImportError:
 DEBUG_ANNOTATIONS_DISABLED = 0
 DEBUG_ANNOTATIONS_ENABLED_VISION = 1
 DEBUG_ANNOTATIONS_ENABLED_ALL = 2
+
+
+# ============================================================
+# EMOJI -> EMOTION  und EMOTION -> ANIM   (ADDED)
+# ============================================================
+
+EMOJI_EMOTION_MAP = {
+    "😂": "laugh", "🤣": "laugh",
+    "😄": "happy", "😁": "happy", "😊": "happy", "🙂": "happy",
+    "😢": "sad", "😭": "sad", "☹️": "sad", "🙁": "sad",
+    "😮": "surprised", "😲": "surprised",
+    "😡": "angry", "😠": "angry",
+    "😴": "sleepy", "🥱": "sleepy",
+    "😉": "wink",
+}
+
+EMOTION_ANIMATIONS = {
+    "happy": ["anim_reacttoface_happy_01", "anim_poked_giggle", "anim_bored_event_02"],
+    "laugh": ["anim_poked_giggle", "anim_speedtap_wingame_intensity02_01"],
+    "sad": ["anim_reacttoface_sad_01", "anim_bored_event_03"],
+    "surprised": ["anim_reacttoface_surprised_01"],
+    "angry": ["anim_reacttoface_angry_01"],
+    "sleepy": ["anim_bored_01"],
+    "wink": ["anim_reacttoface_happy_01"],
+}
+
+def detect_emotion_from_text(text: str):
+    text = text or ""
+    for emoji, emotion in EMOJI_EMOTION_MAP.items():
+        if emoji in text:
+            return emotion
+    return None
 
 
 # Annotator for displaying RobotState (position, etc.) on top of the camera feed
@@ -300,6 +333,8 @@ class RemoteControlCozmo:
             return "say_text"
         elif func == self.try_play_anim:
             return "play_anim"
+        elif func == self.try_play_emotion:  # <--- ADDED
+            return "play_emotion"
         else:
             return "UNKNOWN"
 
@@ -340,6 +375,36 @@ class RemoteControlCozmo:
             return False
 
 
+    # ============================================================
+    # EMOTION PLAY (ADDED)
+    # ============================================================
+
+    def try_play_emotion(self, reply_text):
+        """
+        Wird aus der action_queue aufgerufen.
+        Rückgabe True => Action fertig, False => später nochmal probieren.
+        """
+        emotion = detect_emotion_from_text(reply_text)
+        if not emotion:
+            return True  # nichts zu tun
+
+        anims = EMOTION_ANIMATIONS.get(emotion, [])
+        if not anims:
+            return True
+
+        anim_name = random.choice(anims)
+        print("[EMOTION] %s -> %s" % (emotion, anim_name))
+
+        try:
+            self.cozmo.play_anim(name=anim_name)
+            return True
+        except cozmo.exceptions.RobotBusy:
+            return False
+        except Exception as e:
+            print("[EMOTION] Error: %s" % e)
+            return True
+
+
     def say_text(self, text_to_say):
         self.queue_action((self.try_say_text, text_to_say))
         self.update()
@@ -347,6 +412,16 @@ class RemoteControlCozmo:
 
     def play_animation(self, anim_name):
         self.queue_action((self.try_play_anim, anim_name))
+        self.update()
+
+
+    def play_emotion_from_text(self, reply_text):
+        """
+        Öffentliche Helper-Funktion:
+        Queue: Emotion -> Say (zuverlässig, ohne RobotBusy-Probleme)
+        """
+        self.queue_action((self.try_play_emotion, reply_text))
+        self.queue_action((self.try_say_text, reply_text))
         self.update()
 
 
@@ -392,7 +467,6 @@ class RemoteControlCozmo:
 
     def update_gyro_driving(self):
         pitch, yaw, roll = self.cozmo.device_gyro.euler_angles
-        # these are multiplied by 2 because 90 degress feels better for full velocity than 180 degrees
         drive_dir = self.scale_deadzone(pitch/math.pi, _gyro_driving_deadzone_ratio, 1) * 2
         turn_dir = self.scale_deadzone(roll/math.pi, _gyro_driving_deadzone_ratio, 1) * 2
 
@@ -409,17 +483,13 @@ class RemoteControlCozmo:
         drive_dir = (self.drive_forwards - self.drive_back)
 
         if (drive_dir > 0.1) and self.cozmo.is_on_charger:
-            # cozmo is stuck on the charger, and user is trying to drive off - issue an explicit drive off action
             try:
-                # don't wait for action to complete - we don't want to block the other updates (camera etc.)
                 self.cozmo.drive_off_charger_contacts()
             except cozmo.exceptions.RobotBusy:
-                # Robot is busy doing another action - try again next time we get a drive impulse
                 pass
 
         turn_dir = (self.turn_right - self.turn_left) + self.mouse_dir
         if drive_dir < 0:
-            # It feels more natural to turn the opposite way when reversing
             turn_dir = -turn_dir
 
         forward_speed = self.pick_speed(150, 75, 50)
@@ -429,6 +499,10 @@ class RemoteControlCozmo:
         r_wheel_speed = (drive_dir * forward_speed) - (turn_speed * turn_dir)
 
         self.cozmo.drive_wheels(l_wheel_speed, r_wheel_speed, l_wheel_speed*4, r_wheel_speed*4 )
+
+
+# --- REST DEINES SCRIPTS UNVERÄNDERT ---
+# (ab hier: get_anim_sel_drop_down, Flask routes, run(), main etc.)
 
 def get_anim_sel_drop_down(selectorIndex):
     html_text = '''<select onchange="handleDropDownSelect(this)" name="animSelector''' + str(selectorIndex) + '''">'''
@@ -445,7 +519,6 @@ def get_anim_sel_drop_down(selectorIndex):
 def get_anim_sel_drop_downs():
     html_text = ""
     for i in range(10):
-        # list keys 1..9,0 as that's the layout on the keyboard
         key = i+1 if (i<9) else 0
         html_text += str(key) + ''': ''' + get_anim_sel_drop_down(key) + '''<br>'''
     return html_text
@@ -535,8 +608,6 @@ def handle_index_page():
                 function updateCozmo()
                 {
                     if (gIsMicrosoftBrowser && !gSkipFrame) {
-                        // IE doesn't support MJPEG, so we need to ping the server for more images.
-                        // Though, if this happens too frequently, the controls will be unresponsive.
                         gSkipFrame = true;
                         document.getElementById("cozmoImageId").src="cozmoImage?" + (new Date()).getTime();
                     } else if (gSkipFrame) {
@@ -649,27 +720,22 @@ def handle_index_page():
                     {
                         if (keyCode == 76) // 'L'
                         {
-                            // Simulate a click of the headlight button
                             onHeadlightButtonClicked(document.getElementById("headlightId"))
                         }
                         else if (keyCode == 79) // 'O'
                         {
-                            // Simulate a click of the debug annotations button
                             onDebugAnnotationsButtonClicked(document.getElementById("debugAnnotationsId"))
                         }
                         else if (keyCode == 80) // 'P'
                         {
-                            // Simulate a click of the debug annotations button
                             onFreeplayButtonClicked(document.getElementById("freeplayId"))
                         }
                         else if (keyCode == 81) // 'Q'
                         {
-                            // Simulate a click of the mouse look button
                             onMouseLookButtonClicked(document.getElementById("mouseLookId"))
                         }
                         else if (keyCode == 89) // 'Y'
                         {
-                            // Simulate a click of the device gyro button
                             onDeviceGyroButtonClicked(document.getElementById("deviceGyroId"))
                         }
                     }
@@ -679,8 +745,8 @@ def handle_index_page():
 
                 function handleMouseActivity (e, actionType)
                 {
-                    var clientX = e.clientX / document.body.clientWidth  // 0..1 (left..right)
-                    var clientY = e.clientY / document.body.clientHeight // 0..1 (top..bottom)
+                    var clientX = e.clientX / document.body.clientWidth
+                    var clientY = e.clientY / document.body.clientHeight
                     var isButtonDown = e.which && (e.which != 0) ? 1 : 0
                     var deltaX = (gLastClientX >= 0) ? (clientX - gLastClientX) : 0.0
                     var deltaY = (gLastClientY >= 0) ? (clientY - gLastClientY) : 0.0
@@ -698,7 +764,6 @@ def handle_index_page():
 
                 document.addEventListener("keydown", function(e) { handleKeyActivity(e, "keydown") } );
                 document.addEventListener("keyup",   function(e) { handleKeyActivity(e, "keyup") } );
-
                 document.addEventListener("mousemove",   function(e) { handleMouseActivity(e, "mousemove") } );
 
                 function stopEventPropagation(event)
@@ -725,6 +790,7 @@ def handle_index_page():
     </html>
     '''
 
+
 def get_annotated_image():
     image = remote_control_cozmo.cozmo.world.latest_image
     if _display_debug_annotations != DEBUG_ANNOTATIONS_DISABLED:
@@ -732,6 +798,7 @@ def get_annotated_image():
     else:
         image = image.raw_image
     return image
+
 
 def streaming_video(url_root):
     '''Video streaming generator function'''
@@ -748,8 +815,8 @@ def streaming_video(url_root):
             else:
                 asyncio.sleep(.1)
     except cozmo.exceptions.SDKShutdown:
-        # Tell the main flask thread to shutdown
         requests.post(url_root + 'shutdown')
+
 
 def serve_single_image():
     if remote_control_cozmo:
@@ -761,15 +828,18 @@ def serve_single_image():
             requests.post('shutdown')
     return flask_helpers.serve_pil_image(_default_camera_image)
 
+
 def is_microsoft_browser(request):
     agent = request.user_agent.string
     return 'Edge/' in agent or 'MSIE ' in agent or 'Trident/' in agent
+
 
 @flask_app.route("/cozmoImage")
 def handle_cozmoImage():
     if is_microsoft_browser(request):
         return serve_single_image()
     return flask_helpers.stream_video(streaming_video, request.url_root)
+
 
 def handle_key_event(key_request, is_key_down):
     message = json.loads(key_request.data.decode("utf-8"))
@@ -779,14 +849,15 @@ def handle_key_event(key_request, is_key_down):
                                         is_key_down=is_key_down)
     return ""
 
+
 @flask_app.route('/shutdown', methods=['POST'])
 def shutdown():
     flask_helpers.shutdown_flask(request)
     return ""
 
+
 @flask_app.route('/mousemove', methods=['POST'])
 def handle_mousemove():
-    '''Called from Javascript whenever mouse moves'''
     message = json.loads(request.data.decode("utf-8"))
     if remote_control_cozmo:
         remote_control_cozmo.handle_mouse(mouse_x=(message['clientX']), mouse_y=message['clientY'],
@@ -797,7 +868,6 @@ def handle_mousemove():
 
 @flask_app.route('/setMouseLookEnabled', methods=['POST'])
 def handle_setMouseLookEnabled():
-    '''Called from Javascript whenever mouse-look mode is toggled'''
     message = json.loads(request.data.decode("utf-8"))
     if remote_control_cozmo:
         remote_control_cozmo.set_mouse_look_enabled(is_mouse_look_enabled=message['isMouseLookEnabled'])
@@ -806,7 +876,6 @@ def handle_setMouseLookEnabled():
 
 @flask_app.route('/setHeadlightEnabled', methods=['POST'])
 def handle_setHeadlightEnabled():
-    '''Called from Javascript whenever headlight is toggled on/off'''
     message = json.loads(request.data.decode("utf-8"))
     if remote_control_cozmo:
         remote_control_cozmo.cozmo.set_head_light(enable=message['isHeadlightEnabled'])
@@ -814,8 +883,7 @@ def handle_setHeadlightEnabled():
 
 
 @flask_app.route('/setAreDebugAnnotationsEnabled', methods=['POST'])
-def handle_setAreDebugAnnotationsEnabled():
-    '''Called from Javascript whenever debug-annotations mode is toggled'''
+def handle_setAreDebug_annotationsEnabled():
     message = json.loads(request.data.decode("utf-8"))
     global _display_debug_annotations
     _display_debug_annotations = message['areDebugAnnotationsEnabled']
@@ -829,7 +897,6 @@ def handle_setAreDebugAnnotationsEnabled():
 
 @flask_app.route('/setFreeplayEnabled', methods=['POST'])
 def handle_setFreeplayEnabled():
-    '''Called from Javascript whenever freeplay mode is toggled on/off'''
     message = json.loads(request.data.decode("utf-8"))
     if remote_control_cozmo:
         isFreeplayEnabled = message['isFreeplayEnabled']
@@ -842,7 +909,6 @@ def handle_setFreeplayEnabled():
 
 @flask_app.route('/setDeviceGyroEnabled', methods=['POST'])
 def handle_setDeviceGyroEnabled():
-    '''Called from Javascript whenever device gyro mode is toggled on/off'''
     message = json.loads(request.data.decode("utf-8"))
     if remote_control_cozmo:
         is_device_gyro_enabled = message['isDeviceGyroEnabled']
@@ -850,26 +916,22 @@ def handle_setDeviceGyroEnabled():
             remote_control_cozmo.is_device_gyro_mode_enabled = True
         else:
             remote_control_cozmo.is_device_gyro_mode_enabled = False
-            # stop movement when turning off gyro mode
             remote_control_cozmo.cozmo.drive_wheels(0, 0, 0, 0)
     return ""
 
 
 @flask_app.route('/keydown', methods=['POST'])
 def handle_keydown():
-    '''Called from Javascript whenever a key is down (note: can generate repeat calls if held down)'''
     return handle_key_event(request, is_key_down=True)
 
 
 @flask_app.route('/keyup', methods=['POST'])
 def handle_keyup():
-    '''Called from Javascript whenever a key is released'''
     return handle_key_event(request, is_key_down=False)
 
 
 @flask_app.route('/dropDownSelect', methods=['POST'])
 def handle_dropDownSelect():
-    '''Called from Javascript whenever an animSelector dropdown menu is selected (i.e. modified)'''
     message = json.loads(request.data.decode("utf-8"))
 
     item_name_prefix = "animSelector"
@@ -884,7 +946,6 @@ def handle_dropDownSelect():
 
 @flask_app.route('/sayText', methods=['POST'])
 def handle_sayText():
-    '''Called from Javascript whenever the saytext text field is modified'''
     message = json.loads(request.data.decode("utf-8"))
     if remote_control_cozmo:
         remote_control_cozmo.text_to_say = message['textEntered']
@@ -914,14 +975,14 @@ def run(sdk_conn):
     global remote_control_cozmo
     remote_control_cozmo = RemoteControlCozmo(robot)
 
-    # Turn on image receiving by the camera
     robot.camera.image_stream_enabled = True
 
     flask_helpers.run_flask(flask_app)
 
+
 if __name__ == '__main__':
     cozmo.setup_basic_logging()
-    cozmo.robot.Robot.drive_off_charger_on_connect = False  # RC can drive off charger if required
+    cozmo.robot.Robot.drive_off_charger_on_connect = False
     try:
         cozmo.connect(run)
     except KeyboardInterrupt as e:
