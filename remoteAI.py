@@ -1,9 +1,21 @@
 #!/usr/bin/env python3
 
 # Copyright (c) 2016 Anki, Inc.
-# Licensed under the Apache License, Version 2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License in the file LICENSE.txt or at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 
 '''Control Cozmo using a webpage on your computer.
+
 This example lets you control Cozmo by Remote Control, using a webpage served by Flask.
 '''
 
@@ -12,12 +24,11 @@ import io
 import json
 import math
 import sys
-import time
-import re
 
 sys.path.append('../lib/')
 import flask_helpers
 import cozmo
+
 
 try:
     from flask import Flask, request
@@ -34,37 +45,6 @@ try:
 except ImportError:
     sys.exit("Cannot import from requests: Do `pip3 install --user requests` to install")
 
-# ---------------- AI deps (wie in deinem 2. Script) ----------------
-try:
-    from vosk import Model, KaldiRecognizer
-except ImportError:
-    sys.exit("Cannot import vosk: Do `pip3 install --user vosk` to install")
-
-try:
-    import pyaudio
-except ImportError:
-    sys.exit("Cannot import pyaudio. (macOS: `brew install portaudio` then `pip3 install pyaudio`)")
-# ------------------------------------------------------------------
-
-
-# ============================================================
-# AI CONFIG (aus deinem anderen Projekt)
-# ============================================================
-VOSK_MODEL_PATH = "/Users/erkut/Ozmo/vosk-model-de-0.21"
-vosk_model = Model(VOSK_MODEL_PATH)
-
-OLLAMA_URL = "http://localhost:11434/api/generate"
-OLLAMA_MODEL = "gemma3:1b"
-OLLAMA_TIMEOUT_SEC = 30
-
-cozmo_voice = True
-voice_speed = 0.75
-voice_pitch = -100
-
-MIC_TIMEOUT_SEC = 10
-MAX_NEW_TOKENS = 80
-# ============================================================
-
 
 DEBUG_ANNOTATIONS_DISABLED = 0
 DEBUG_ANNOTATIONS_ENABLED_VISION = 1
@@ -79,17 +59,14 @@ class RobotStateDisplay(cozmo.annotate.Annotator):
         bounds = [3, 0, image.width, image.height]
 
         def print_line(text_line):
-            text = cozmo.annotate.ImageText(
-                text_line,
-                position=cozmo.annotate.TOP_LEFT,
-                outline_color='black',
-                color='lightblue'
-            )
+            text = cozmo.annotate.ImageText(text_line, position=cozmo.annotate.TOP_LEFT, outline_color='black', color='lightblue')
             text.render(d, bounds)
             TEXT_HEIGHT = 11
             bounds[1] += TEXT_HEIGHT
 
         robot = self.world.robot  # type: cozmo.robot.Robot
+
+        # Display the Pose info for the robot
 
         pose = robot.pose
         print_line('Pose: Pos = <%.1f, %.1f, %.1f>' % pose.position.x_y_z)
@@ -97,8 +74,12 @@ class RobotStateDisplay(cozmo.annotate.Annotator):
         print_line('Pose: angle_z = %.1f' % pose.rotation.angle_z.degrees)
         print_line('Pose: origin_id: %s' % pose.origin_id)
 
+        # Display the Accelerometer and Gyro data for the robot
+
         print_line('Accelmtr: <%.1f, %.1f, %.1f>' % robot.accelerometer.x_y_z)
         print_line('Gyro: <%.1f, %.1f, %.1f>' % robot.gyro.x_y_z)
+
+        # Display the Accelerometer and Gyro data for the mobile device
 
         if robot.device_accel_raw is not None:
             print_line('Device Acc Raw: <%.2f, %.2f, %.2f>' % robot.device_accel_raw.x_y_z)
@@ -112,118 +93,20 @@ class RobotStateDisplay(cozmo.annotate.Annotator):
 
 
 def create_default_image(image_width, image_height, do_gradient=False):
+    '''Create a place-holder PIL image to use until we have a live feed from Cozmo'''
     image_bytes = bytearray([0x70, 0x70, 0x70]) * image_width * image_height
 
     if do_gradient:
         i = 0
         for y in range(image_height):
             for x in range(image_width):
-                image_bytes[i] = int(255.0 * (x / image_width))      # R
-                image_bytes[i+1] = int(255.0 * (y / image_height))   # G
-                image_bytes[i+2] = 0                                 # B
+                image_bytes[i] = int(255.0 * (x / image_width))   # R
+                image_bytes[i+1] = int(255.0 * (y / image_height))  # G
+                image_bytes[i+2] = 0                                # B
                 i += 3
 
     image = Image.frombytes('RGB', (image_width, image_height), bytes(image_bytes))
     return image
-
-
-# ---------------- AI helpers (minimal) ----------------
-def sanitize_text_for_cozmo(text: str) -> str:
-    if not isinstance(text, str):
-        text = str(text)
-    text = text.replace("\n", " ").strip()
-
-    phonetic_map = {
-        "ä": "ae", "Ä": "Ae",
-        "ö": "oe", "Ö": "Oe",
-        "ü": "ue", "Ü": "Ue",
-        "ß": "ss",
-    }
-
-    out = []
-    for ch in text:
-        if ch in phonetic_map:
-            out.append(phonetic_map[ch])
-        else:
-            code = ord(ch)
-            if 32 <= code <= 126:
-                out.append(ch)
-            else:
-                out.append(" ")
-    cleaned = " ".join("".join(out).split())
-    return cleaned if cleaned else "Ich habe dich nicht verstanden."
-
-
-def clean_reply(text: str) -> str:
-    text = (text or "").strip()
-    text = re.sub(r"\s+", " ", text)
-
-    if "Antwort:" in text:
-        text = text.split("Antwort:", 1)[-1].strip()
-
-    parts = [p.strip() for p in re.split(r"[.!?]", text) if p.strip()]
-    if len(parts) >= 2:
-        return parts[0] + ". " + parts[1] + "."
-    if len(parts) == 1:
-        return parts[0] + "."
-    return "Ich bin mir nicht sicher. Kannst du das anders sagen?"
-
-
-def recognize_from_microphone(timeout_sec=10) -> str:
-    recognizer = KaldiRecognizer(vosk_model, 16000)
-
-    mic = pyaudio.PyAudio()
-    stream = mic.open(format=pyaudio.paInt16, channels=1, rate=16000,
-                      input=True, frames_per_buffer=4096)
-    stream.start_stream()
-
-    start = time.monotonic()
-    text = ""
-    while True:
-        data = stream.read(4096, exception_on_overflow=False)
-        if recognizer.AcceptWaveform(data):
-            try:
-                obj = json.loads(recognizer.Result())
-                text = obj.get("text", "")
-            except Exception:
-                text = ""
-            break
-        if time.monotonic() - start > timeout_sec:
-            break
-
-    stream.stop_stream()
-    stream.close()
-    mic.terminate()
-
-    return (text or "").strip()
-
-
-def generate_response_de(user_input: str, prompt_prefix: str, max_new_tokens=80) -> str:
-    user_input = re.sub(r"\s+", " ", (user_input or "").strip())
-    if not user_input:
-        return "Sag das bitte nochmal."
-
-    prompt = (prompt_prefix.strip() + "\n" +
-              f"Frage: {user_input}\n"
-              "Antwort:")
-
-    payload = {
-        "model": OLLAMA_MODEL,
-        "prompt": prompt,
-        "stream": False,
-        "options": {"num_predict": int(max_new_tokens), "temperature": 0.7, "top_p": 0.9}
-    }
-
-    try:
-        r = requests.post(OLLAMA_URL, json=payload, timeout=OLLAMA_TIMEOUT_SEC)
-        r.raise_for_status()
-        decoded = (r.json().get("response") or "").strip()
-    except Exception as e:
-        print(f"[OLLAMA ERROR] {e}")
-        decoded = ""
-
-    return clean_reply(decoded)
-# -----------------------------------------------------
 
 
 flask_app = Flask(__name__)
@@ -237,6 +120,7 @@ _display_debug_annotations = DEBUG_ANNOTATIONS_ENABLED_ALL
 
 
 def remap_to_range(x, x_min, x_max, out_min, out_max):
+    '''convert x (in x_min..x_max range) to out_min..out_max range'''
     if x < x_min:
         return out_min
     elif x > x_max:
@@ -247,9 +131,9 @@ def remap_to_range(x, x_min, x_max, out_min, out_max):
 
 
 class RemoteControlCozmo:
-    def __init__(self, coz, loop):
+
+    def __init__(self, coz):
         self.cozmo = coz
-        self.loop = loop  # <- wichtig: Loop aus cozmo.connect
 
         self.drive_forwards = 0
         self.drive_back = 0
@@ -267,28 +151,30 @@ class RemoteControlCozmo:
         self.is_device_gyro_mode_enabled = _is_device_gyro_mode_enabled_by_default
         self.mouse_dir = 0
 
-        # ---------------- AI state ----------------
-        self.ai_enabled = False
-        self.ai_task = None
-        self.ai_prompt_prefix = (
-            "Du bist Cozmo, ein kleiner freundlicher Roboter. "
-            "Antworte kurz und hilfreich auf Deutsch in 1-2 Saetzen."
-        )
-        # -----------------------------------------
-
         all_anim_names = list(self.cozmo.anim_names)
         all_anim_names.sort()
         self.anim_names = []
 
-        bad_anim_names = ["ANIMATION_TEST", "soundTestAnim"]
+        # Hide a few specific test animations that don't behave well
+        bad_anim_names = [
+            "ANIMATION_TEST",
+            "soundTestAnim"]
+
         for anim_name in all_anim_names:
             if anim_name not in bad_anim_names:
                 self.anim_names.append(anim_name)
 
-        default_anims_for_keys = ["anim_bored_01", "anim_poked_giggle", "anim_pounce_success_02",
-                                  "anim_bored_event_02", "anim_bored_event_03", "anim_petdetection_cat_01",
-                                  "anim_petdetection_dog_03", "anim_reacttoface_unidentified_02",
-                                  "anim_upgrade_reaction_lift_01", "anim_speedtap_wingame_intensity02_01"]
+        default_anims_for_keys = ["anim_bored_01",  # 0
+                                  "anim_poked_giggle",  # 1
+                                  "anim_pounce_success_02",  # 2
+                                  "anim_bored_event_02",  # 3
+                                  "anim_bored_event_03",  # 4
+                                  "anim_petdetection_cat_01",  # 5
+                                  "anim_petdetection_dog_03",  # 6
+                                  "anim_reacttoface_unidentified_02",  # 7
+                                  "anim_upgrade_reaction_lift_01",  # 8
+                                  "anim_speedtap_wingame_intensity02_01"  # 9
+                                 ]
 
         self.anim_index_for_key = [0] * 10
         kI = 0
@@ -301,84 +187,22 @@ class RemoteControlCozmo:
             self.anim_index_for_key[kI] = anim_idx
             kI += 1
 
+
         self.action_queue = []
         self.text_to_say = "Hi I'm Cozmo"
 
-    # ---------------- AI control ----------------
-    def set_ai_enabled(self, enabled: bool):
-        self.ai_enabled = bool(enabled)
-        if self.ai_enabled:
-            if self.ai_task is None or self.ai_task.done():
-                self.ai_task = self.loop.create_task(self._ai_chat_loop())
-        # wenn False: loop beendet sich selbst nach nächstem Check
-
-    def set_ai_prompt(self, new_prompt: str):
-        new_prompt = (new_prompt or "").strip()
-        if new_prompt:
-            self.ai_prompt_prefix = new_prompt
-
-    async def _run_blocking(self, fn, *args):
-        # kompatibel auch ohne asyncio.to_thread
-        return await self.loop.run_in_executor(None, lambda: fn(*args))
-
-    async def _ai_chat_loop(self):
-        print("[AI] chat loop started")
-        try:
-            await self.cozmo.say_text(
-                sanitize_text_for_cozmo("AI Modus ist aktiv."),
-                use_cozmo_voice=cozmo_voice,
-                duration_scalar=voice_speed,
-                voice_pitch=voice_pitch
-            ).wait_for_completed()
-        except Exception:
-            pass
-
-        while self.ai_enabled:
-            human = await self._run_blocking(recognize_from_microphone, MIC_TIMEOUT_SEC)
-            if not self.ai_enabled:
-                break
-            if not human:
-                continue
-
-            low = human.lower().strip()
-            if low in {"stop", "stopp", "ende", "fertig", "tschüss", "ciao"}:
-                self.ai_enabled = False
-                break
-
-            reply = await self._run_blocking(generate_response_de, human, self.ai_prompt_prefix, MAX_NEW_TOKENS)
-            safe_reply = sanitize_text_for_cozmo(reply)[:245]
-
-            print(f"[HUMAN] {human}")
-            print(f"[AI   ] {reply}")
-
-            try:
-                await self.cozmo.say_text(
-                    safe_reply,
-                    use_cozmo_voice=cozmo_voice,
-                    duration_scalar=voice_speed,
-                    voice_pitch=voice_pitch
-                ).wait_for_completed()
-            except Exception:
-                pass
-
-        print("[AI] chat loop ended")
-        try:
-            await self.cozmo.say_text(
-                sanitize_text_for_cozmo("AI Modus ist aus."),
-                use_cozmo_voice=cozmo_voice,
-                duration_scalar=voice_speed,
-                voice_pitch=voice_pitch
-            ).wait_for_completed()
-        except Exception:
-            pass
-    # --------------------------------------------
 
     def set_anim(self, key_index, anim_index):
         self.anim_index_for_key[key_index] = anim_index
 
+
     def handle_mouse(self, mouse_x, mouse_y, delta_x, delta_y, is_button_down):
+        '''Called whenever mouse moves
+            mouse_x, mouse_y are in in 0..1 range (0,0 = top left, 1,1 = bottom right of window)
+            delta_x, delta_y are the change in mouse_x/y since the last update
+        '''
         if self.is_mouse_look_enabled:
-            mouse_sensitivity = 1.5
+            mouse_sensitivity = 1.5 # higher = more twitchy
             self.mouse_dir = remap_to_range(mouse_x, 0.0, 1.0, -mouse_sensitivity, mouse_sensitivity)
             self.update_mouse_driving()
 
@@ -387,16 +211,24 @@ class RemoteControlCozmo:
             head_vel = head_angle_delta * 0.03
             self.cozmo.move_head(head_vel)
 
+
     def set_mouse_look_enabled(self, is_mouse_look_enabled):
         was_mouse_look_enabled = self.is_mouse_look_enabled
         self.is_mouse_look_enabled = is_mouse_look_enabled
         if not is_mouse_look_enabled:
+            # cancel any current mouse-look turning
             self.mouse_dir = 0
             if was_mouse_look_enabled:
                 self.update_mouse_driving()
                 self.update_head()
 
+
     def handle_key(self, key_code, is_shift_down, is_ctrl_down, is_alt_down, is_key_down):
+        '''Called on any key press or release
+           Holding a key down may result in repeated handle_key calls with is_key_down==True
+        '''
+
+        # Update desired speed / fidelity of actions based on shift/alt being held
         was_go_fast = self.go_fast
         was_go_slow = self.go_slow
 
@@ -405,6 +237,7 @@ class RemoteControlCozmo:
 
         speed_changed = (was_go_fast != self.go_fast) or (was_go_slow != self.go_slow)
 
+        # Update state of driving intent from keyboard, and if anything changed then call update_driving
         update_driving = True
         if key_code == ord('W'):
             self.drive_forwards = is_key_down
@@ -418,6 +251,7 @@ class RemoteControlCozmo:
             if not speed_changed:
                 update_driving = False
 
+        # Update state of lift move intent from keyboard, and if anything changed then call update_lift
         update_lift = True
         if key_code == ord('R'):
             self.lift_up = is_key_down
@@ -427,6 +261,7 @@ class RemoteControlCozmo:
             if not speed_changed:
                 update_lift = False
 
+        # Update state of head move intent from keyboard, and if anything changed then call update_head
         update_head = True
         if key_code == ord('T'):
             self.head_up = is_key_down
@@ -436,6 +271,7 @@ class RemoteControlCozmo:
             if not speed_changed:
                 update_head = False
 
+        # Update driving, head and lift as appropriate
         if update_driving:
             self.update_mouse_driving()
         if update_head:
@@ -443,6 +279,7 @@ class RemoteControlCozmo:
         if update_lift:
             self.update_lift()
 
+        # Handle any keys being released (e.g. the end of a key-click)
         if not is_key_down:
             if (key_code >= ord('0')) and (key_code <= ord('9')):
                 anim_name = self.key_code_to_anim_name(key_code)
@@ -450,11 +287,13 @@ class RemoteControlCozmo:
             elif key_code == ord(' '):
                 self.say_text(self.text_to_say)
 
+
     def key_code_to_anim_name(self, key_code):
         key_num = key_code - ord('0')
         anim_num = self.anim_index_for_key[key_num]
         anim_name = self.anim_names[anim_num]
         return anim_name
+
 
     def func_to_name(self, func):
         if func == self.try_say_text:
@@ -464,9 +303,11 @@ class RemoteControlCozmo:
         else:
             return "UNKNOWN"
 
+
     def action_to_text(self, action):
         func, args = action
         return self.func_to_name(func) + "( " + str(args) + " )"
+
 
     def action_queue_to_text(self, action_queue):
         out_text = ""
@@ -476,10 +317,12 @@ class RemoteControlCozmo:
             i += 1
         return out_text
 
+
     def queue_action(self, new_action):
         if len(self.action_queue) > 10:
             self.action_queue.pop(0)
         self.action_queue.append(new_action)
+
 
     def try_say_text(self, text_to_say):
         try:
@@ -488,6 +331,7 @@ class RemoteControlCozmo:
         except cozmo.exceptions.RobotBusy:
             return False
 
+
     def try_play_anim(self, anim_name):
         try:
             self.cozmo.play_anim(name=anim_name)
@@ -495,22 +339,27 @@ class RemoteControlCozmo:
         except cozmo.exceptions.RobotBusy:
             return False
 
+
     def say_text(self, text_to_say):
         self.queue_action((self.try_say_text, text_to_say))
         self.update()
+
 
     def play_animation(self, anim_name):
         self.queue_action((self.try_play_anim, anim_name))
         self.update()
 
+
     def update(self):
+        '''Try and execute the next queued action'''
         if len(self.action_queue) > 0:
             queued_action, action_args = self.action_queue[0]
             if queued_action(action_args):
                 self.action_queue.pop(0)
-
+        # Update gyro
         if self.is_device_gyro_mode_enabled and self.cozmo.device_gyro:
             self.update_gyro_driving()
+
 
     def pick_speed(self, fast_speed, mid_speed, slow_speed):
         if self.go_fast:
@@ -520,10 +369,12 @@ class RemoteControlCozmo:
             return slow_speed
         return mid_speed
 
+
     def update_lift(self):
         lift_speed = self.pick_speed(8, 4, 2)
         lift_vel = (self.lift_up - self.lift_down) * lift_speed
         self.cozmo.move_lift(lift_vel)
+
 
     def update_head(self):
         if not self.is_mouse_look_enabled:
@@ -541,6 +392,7 @@ class RemoteControlCozmo:
 
     def update_gyro_driving(self):
         pitch, yaw, roll = self.cozmo.device_gyro.euler_angles
+        # these are multiplied by 2 because 90 degress feels better for full velocity than 180 degrees
         drive_dir = self.scale_deadzone(pitch/math.pi, _gyro_driving_deadzone_ratio, 1) * 2
         turn_dir = self.scale_deadzone(roll/math.pi, _gyro_driving_deadzone_ratio, 1) * 2
 
@@ -557,13 +409,17 @@ class RemoteControlCozmo:
         drive_dir = (self.drive_forwards - self.drive_back)
 
         if (drive_dir > 0.1) and self.cozmo.is_on_charger:
+            # cozmo is stuck on the charger, and user is trying to drive off - issue an explicit drive off action
             try:
+                # don't wait for action to complete - we don't want to block the other updates (camera etc.)
                 self.cozmo.drive_off_charger_contacts()
             except cozmo.exceptions.RobotBusy:
+                # Robot is busy doing another action - try again next time we get a drive impulse
                 pass
 
         turn_dir = (self.turn_right - self.turn_left) + self.mouse_dir
         if drive_dir < 0:
+            # It feels more natural to turn the opposite way when reversing
             turn_dir = -turn_dir
 
         forward_speed = self.pick_speed(150, 75, 50)
@@ -572,8 +428,7 @@ class RemoteControlCozmo:
         l_wheel_speed = (drive_dir * forward_speed) + (turn_speed * turn_dir)
         r_wheel_speed = (drive_dir * forward_speed) - (turn_speed * turn_dir)
 
-        self.cozmo.drive_wheels(l_wheel_speed, r_wheel_speed, l_wheel_speed*4, r_wheel_speed*4)
-
+        self.cozmo.drive_wheels(l_wheel_speed, r_wheel_speed, l_wheel_speed*4, r_wheel_speed*4 )
 
 def get_anim_sel_drop_down(selectorIndex):
     html_text = '''<select onchange="handleDropDownSelect(this)" name="animSelector''' + str(selectorIndex) + '''">'''
@@ -590,6 +445,7 @@ def get_anim_sel_drop_down(selectorIndex):
 def get_anim_sel_drop_downs():
     html_text = ""
     for i in range(10):
+        # list keys 1..9,0 as that's the layout on the keyboard
         key = i+1 if (i<9) else 0
         html_text += str(key) + ''': ''' + get_anim_sel_drop_down(key) + '''<br>'''
     return html_text
@@ -601,9 +457,6 @@ def to_js_bool_string(bool_value):
 
 @flask_app.route("/")
 def handle_index_page():
-    # AI prompt anzeigen (escaped minimal)
-    prompt = remote_control_cozmo.ai_prompt_prefix.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
-
     return '''
     <html>
         <head>
@@ -643,14 +496,6 @@ def handle_index_page():
                         <b>O</b> : Toggle Debug Annotations: <button id="debugAnnotationsId" onClick=onDebugAnnotationsButtonClicked(this) style="font-size: 14px">Default</button><br>
                         <b>P</b> : Toggle Free Play mode: <button id="freeplayId" onClick=onFreeplayButtonClicked(this) style="font-size: 14px">Default</button><br>
                         <b>Y</b> : Toggle Device Gyro mode: <button id="deviceGyroId" onClick=onDeviceGyroButtonClicked(this) style="font-size: 14px">Default</button><br>
-
-                        <h3>AI Chat</h3>
-                        <b>I</b> : Toggle AI Chat: <button id="aiId" onClick=onAiButtonClicked(this) style="font-size: 14px">Disabled</button><br>
-                        Prompt:<br>
-                        <textarea id="aiPromptId" rows="5" cols="42">''' + prompt + '''</textarea><br>
-                        <button id="aiPromptSaveId" onClick=onAiPromptSaveClicked(this) style="font-size: 14px">Save Prompt</button>
-                        <div id="AiInfoId"></div>
-
                         <h3>Play Animations</h3>
                         <b>0 .. 9</b> : Play Animation mapped to that key<br>
                         <h3>Talk</h3>
@@ -672,8 +517,6 @@ def handle_index_page():
                 var gIsHeadlightEnabled = false
                 var gIsFreeplayEnabled = false
                 var gIsDeviceGyroEnabled = false
-                var gIsAiEnabled = false
-
                 var gUserAgent = window.navigator.userAgent;
                 var gIsMicrosoftBrowser = gUserAgent.indexOf('MSIE ') > 0 || gUserAgent.indexOf('Trident/') > 0 || gUserAgent.indexOf('Edge/') > 0;
                 var gSkipFrame = false;
@@ -692,6 +535,8 @@ def handle_index_page():
                 function updateCozmo()
                 {
                     if (gIsMicrosoftBrowser && !gSkipFrame) {
+                        // IE doesn't support MJPEG, so we need to ping the server for more images.
+                        // Though, if this happens too frequently, the controls will be unresponsive.
                         gSkipFrame = true;
                         document.getElementById("cozmoImageId").src="cozmoImage?" + (new Date()).getTime();
                     } else if (gSkipFrame) {
@@ -713,21 +558,6 @@ def handle_index_page():
                 function updateButtonEnabledText(button, isEnabled)
                 {
                     button.firstChild.data = isEnabled ? "Enabled" : "Disabled";
-                }
-
-                function onAiButtonClicked(button)
-                {
-                    gIsAiEnabled = !gIsAiEnabled;
-                    updateButtonEnabledText(button, gIsAiEnabled);
-                    postHttpRequest("setAiEnabled", {isAiEnabled: gIsAiEnabled});
-                }
-
-                function onAiPromptSaveClicked(button)
-                {
-                    var txt = document.getElementById("aiPromptId").value;
-                    postHttpRequest("setAiPrompt", {promptText: txt});
-                    document.getElementById("AiInfoId").innerHTML = "Prompt saved.";
-                    setTimeout(function(){ document.getElementById("AiInfoId").innerHTML = ""; }, 1500);
                 }
 
                 function onMouseLookButtonClicked(button)
@@ -800,7 +630,6 @@ def handle_index_page():
                 updateDebugAnnotationButtonEnabledText(document.getElementById("debugAnnotationsId"), gAreDebugAnnotationsEnabled);
                 updateButtonEnabledText(document.getElementById("freeplayId"), gIsFreeplayEnabled);
                 updateButtonEnabledText(document.getElementById("deviceGyroId"), gIsDeviceGyroEnabled);
-                updateButtonEnabledText(document.getElementById("aiId"), gIsAiEnabled);
 
                 function handleDropDownSelect(selectObject)
                 {
@@ -818,28 +647,29 @@ def handle_index_page():
 
                     if (actionType=="keyup")
                     {
-                        if (keyCode == 73) // 'I'
+                        if (keyCode == 76) // 'L'
                         {
-                            onAiButtonClicked(document.getElementById("aiId"))
-                        }
-                        else if (keyCode == 76) // 'L'
-                        {
+                            // Simulate a click of the headlight button
                             onHeadlightButtonClicked(document.getElementById("headlightId"))
                         }
                         else if (keyCode == 79) // 'O'
                         {
+                            // Simulate a click of the debug annotations button
                             onDebugAnnotationsButtonClicked(document.getElementById("debugAnnotationsId"))
                         }
                         else if (keyCode == 80) // 'P'
                         {
+                            // Simulate a click of the debug annotations button
                             onFreeplayButtonClicked(document.getElementById("freeplayId"))
                         }
                         else if (keyCode == 81) // 'Q'
                         {
+                            // Simulate a click of the mouse look button
                             onMouseLookButtonClicked(document.getElementById("mouseLookId"))
                         }
                         else if (keyCode == 89) // 'Y'
                         {
+                            // Simulate a click of the device gyro button
                             onDeviceGyroButtonClicked(document.getElementById("deviceGyroId"))
                         }
                     }
@@ -849,8 +679,8 @@ def handle_index_page():
 
                 function handleMouseActivity (e, actionType)
                 {
-                    var clientX = e.clientX / document.body.clientWidth
-                    var clientY = e.clientY / document.body.clientHeight
+                    var clientX = e.clientX / document.body.clientWidth  // 0..1 (left..right)
+                    var clientY = e.clientY / document.body.clientHeight // 0..1 (top..bottom)
                     var isButtonDown = e.which && (e.which != 0) ? 1 : 0
                     var deltaX = (gLastClientX >= 0) ? (clientX - gLastClientX) : 0.0
                     var deltaY = (gLastClientY >= 0) ? (clientY - gLastClientY) : 0.0
@@ -868,22 +698,32 @@ def handle_index_page():
 
                 document.addEventListener("keydown", function(e) { handleKeyActivity(e, "keydown") } );
                 document.addEventListener("keyup",   function(e) { handleKeyActivity(e, "keyup") } );
+
                 document.addEventListener("mousemove",   function(e) { handleMouseActivity(e, "mousemove") } );
 
                 function stopEventPropagation(event)
                 {
-                    if (event.stopPropagation) { event.stopPropagation(); }
-                    else { event.cancelBubble = true }
+                    if (event.stopPropagation)
+                    {
+                        event.stopPropagation();
+                    }
+                    else
+                    {
+                        event.cancelBubble = true
+                    }
                 }
 
-                document.getElementById("sayTextId").addEventListener("keydown", function(event) { stopEventPropagation(event); } );
-                document.getElementById("sayTextId").addEventListener("keyup", function(event) { stopEventPropagation(event); } );
+                document.getElementById("sayTextId").addEventListener("keydown", function(event) {
+                    stopEventPropagation(event);
+                } );
+                document.getElementById("sayTextId").addEventListener("keyup", function(event) {
+                    stopEventPropagation(event);
+                } );
             </script>
 
         </body>
     </html>
     '''
-
 
 def get_annotated_image():
     image = remote_control_cozmo.cozmo.world.latest_image
@@ -893,22 +733,23 @@ def get_annotated_image():
         image = image.raw_image
     return image
 
-
 def streaming_video(url_root):
+    '''Video streaming generator function'''
     try:
         while True:
             if remote_control_cozmo:
                 image = get_annotated_image()
+
                 img_io = io.BytesIO()
                 image.save(img_io, 'PNG')
                 img_io.seek(0)
                 yield (b'--frame\r\n'
-                       b'Content-Type: image/png\r\n\r\n' + img_io.getvalue() + b'\r\n')
+                    b'Content-Type: image/png\r\n\r\n' + img_io.getvalue() + b'\r\n')
             else:
                 asyncio.sleep(.1)
     except cozmo.exceptions.SDKShutdown:
+        # Tell the main flask thread to shutdown
         requests.post(url_root + 'shutdown')
-
 
 def serve_single_image():
     if remote_control_cozmo:
@@ -920,11 +761,9 @@ def serve_single_image():
             requests.post('shutdown')
     return flask_helpers.serve_pil_image(_default_camera_image)
 
-
 def is_microsoft_browser(request):
     agent = request.user_agent.string
     return 'Edge/' in agent or 'MSIE ' in agent or 'Trident/' in agent
-
 
 @flask_app.route("/cozmoImage")
 def handle_cozmoImage():
@@ -932,42 +771,33 @@ def handle_cozmoImage():
         return serve_single_image()
     return flask_helpers.stream_video(streaming_video, request.url_root)
 
-
 def handle_key_event(key_request, is_key_down):
     message = json.loads(key_request.data.decode("utf-8"))
     if remote_control_cozmo:
-        remote_control_cozmo.handle_key(
-            key_code=(message['keyCode']),
-            is_shift_down=message['hasShift'],
-            is_ctrl_down=message['hasCtrl'],
-            is_alt_down=message['hasAlt'],
-            is_key_down=is_key_down
-        )
+        remote_control_cozmo.handle_key(key_code=(message['keyCode']), is_shift_down=message['hasShift'],
+                                        is_ctrl_down=message['hasCtrl'], is_alt_down=message['hasAlt'],
+                                        is_key_down=is_key_down)
     return ""
-
 
 @flask_app.route('/shutdown', methods=['POST'])
 def shutdown():
     flask_helpers.shutdown_flask(request)
     return ""
 
-
 @flask_app.route('/mousemove', methods=['POST'])
 def handle_mousemove():
+    '''Called from Javascript whenever mouse moves'''
     message = json.loads(request.data.decode("utf-8"))
     if remote_control_cozmo:
-        remote_control_cozmo.handle_mouse(
-            mouse_x=(message['clientX']),
-            mouse_y=message['clientY'],
-            delta_x=message['deltaX'],
-            delta_y=message['deltaY'],
-            is_button_down=message['isButtonDown']
-        )
+        remote_control_cozmo.handle_mouse(mouse_x=(message['clientX']), mouse_y=message['clientY'],
+                                          delta_x=message['deltaX'], delta_y=message['deltaY'],
+                                          is_button_down=message['isButtonDown'])
     return ""
 
 
 @flask_app.route('/setMouseLookEnabled', methods=['POST'])
 def handle_setMouseLookEnabled():
+    '''Called from Javascript whenever mouse-look mode is toggled'''
     message = json.loads(request.data.decode("utf-8"))
     if remote_control_cozmo:
         remote_control_cozmo.set_mouse_look_enabled(is_mouse_look_enabled=message['isMouseLookEnabled'])
@@ -976,6 +806,7 @@ def handle_setMouseLookEnabled():
 
 @flask_app.route('/setHeadlightEnabled', methods=['POST'])
 def handle_setHeadlightEnabled():
+    '''Called from Javascript whenever headlight is toggled on/off'''
     message = json.loads(request.data.decode("utf-8"))
     if remote_control_cozmo:
         remote_control_cozmo.cozmo.set_head_light(enable=message['isHeadlightEnabled'])
@@ -984,6 +815,7 @@ def handle_setHeadlightEnabled():
 
 @flask_app.route('/setAreDebugAnnotationsEnabled', methods=['POST'])
 def handle_setAreDebugAnnotationsEnabled():
+    '''Called from Javascript whenever debug-annotations mode is toggled'''
     message = json.loads(request.data.decode("utf-8"))
     global _display_debug_annotations
     _display_debug_annotations = message['areDebugAnnotationsEnabled']
@@ -997,6 +829,7 @@ def handle_setAreDebugAnnotationsEnabled():
 
 @flask_app.route('/setFreeplayEnabled', methods=['POST'])
 def handle_setFreeplayEnabled():
+    '''Called from Javascript whenever freeplay mode is toggled on/off'''
     message = json.loads(request.data.decode("utf-8"))
     if remote_control_cozmo:
         isFreeplayEnabled = message['isFreeplayEnabled']
@@ -1009,6 +842,7 @@ def handle_setFreeplayEnabled():
 
 @flask_app.route('/setDeviceGyroEnabled', methods=['POST'])
 def handle_setDeviceGyroEnabled():
+    '''Called from Javascript whenever device gyro mode is toggled on/off'''
     message = json.loads(request.data.decode("utf-8"))
     if remote_control_cozmo:
         is_device_gyro_enabled = message['isDeviceGyroEnabled']
@@ -1016,40 +850,26 @@ def handle_setDeviceGyroEnabled():
             remote_control_cozmo.is_device_gyro_mode_enabled = True
         else:
             remote_control_cozmo.is_device_gyro_mode_enabled = False
+            # stop movement when turning off gyro mode
             remote_control_cozmo.cozmo.drive_wheels(0, 0, 0, 0)
     return ""
 
 
-# -------- NEW: AI routes --------
-@flask_app.route('/setAiEnabled', methods=['POST'])
-def handle_setAiEnabled():
-    message = json.loads(request.data.decode("utf-8"))
-    if remote_control_cozmo:
-        remote_control_cozmo.set_ai_enabled(bool(message.get('isAiEnabled', False)))
-    return ""
-
-
-@flask_app.route('/setAiPrompt', methods=['POST'])
-def handle_setAiPrompt():
-    message = json.loads(request.data.decode("utf-8"))
-    if remote_control_cozmo:
-        remote_control_cozmo.set_ai_prompt(message.get('promptText', ''))
-    return ""
-# -------------------------------
-
-
 @flask_app.route('/keydown', methods=['POST'])
 def handle_keydown():
+    '''Called from Javascript whenever a key is down (note: can generate repeat calls if held down)'''
     return handle_key_event(request, is_key_down=True)
 
 
 @flask_app.route('/keyup', methods=['POST'])
 def handle_keyup():
+    '''Called from Javascript whenever a key is released'''
     return handle_key_event(request, is_key_down=False)
 
 
 @flask_app.route('/dropDownSelect', methods=['POST'])
 def handle_dropDownSelect():
+    '''Called from Javascript whenever an animSelector dropdown menu is selected (i.e. modified)'''
     message = json.loads(request.data.decode("utf-8"))
 
     item_name_prefix = "animSelector"
@@ -1064,6 +884,7 @@ def handle_dropDownSelect():
 
 @flask_app.route('/sayText', methods=['POST'])
 def handle_sayText():
+    '''Called from Javascript whenever the saytext text field is modified'''
     message = json.loads(request.data.decode("utf-8"))
     if remote_control_cozmo:
         remote_control_cozmo.text_to_say = message['textEntered']
@@ -1080,8 +901,7 @@ def handle_updateCozmo():
             action_queue_text += str(i) + ": " + remote_control_cozmo.action_to_text(action) + "<br>"
             i += 1
 
-        ai_status = "ON" if remote_control_cozmo.ai_enabled else "OFF"
-        return '''AI: ''' + ai_status + '''<br><br>Action Queue:<br>''' + action_queue_text + '''
+        return '''Action Queue:<br>''' + action_queue_text + '''
         '''
     return ""
 
@@ -1092,15 +912,16 @@ def run(sdk_conn):
     robot.enable_device_imu(True, True, True)
 
     global remote_control_cozmo
-    remote_control_cozmo = RemoteControlCozmo(robot, sdk_conn.loop)
+    remote_control_cozmo = RemoteControlCozmo(robot)
 
+    # Turn on image receiving by the camera
     robot.camera.image_stream_enabled = True
-    flask_helpers.run_flask(flask_app)
 
+    flask_helpers.run_flask(flask_app)
 
 if __name__ == '__main__':
     cozmo.setup_basic_logging()
-    cozmo.robot.Robot.drive_off_charger_on_connect = False
+    cozmo.robot.Robot.drive_off_charger_on_connect = False  # RC can drive off charger if required
     try:
         cozmo.connect(run)
     except KeyboardInterrupt as e:
